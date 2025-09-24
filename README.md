@@ -1,3 +1,5 @@
+INTEGRANTES: CAMILO HERRERA - VICTOR MARDONES - DEBORA LEAL
+
 Memorice (Pygame)
 
 Pequeño proyecto de Memorice (parejas) con interfaz en Pygame y un agente automático (Greedy / MCTS reducido) para demostrar estrategias de resolución.
