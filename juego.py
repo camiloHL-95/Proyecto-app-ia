@@ -19,22 +19,14 @@ class MemoryGame:
             self.board = vals
         else:
             self.board = board[:]
-        self.matched = [False]*self.N
-        self.revealed = [None]*self.N
+        self.matched = [False]*self.N      # cartas ya emparejadas (quedan arriba)
+        self.revealed = [None]*self.N      # cartas visibles temporalmente (levantadas en este turno)
         self.turns = 0
 
-    def flip(self, pos):
+    def flip_value(self, pos):
+        """Devuelve el valor de la carta en pos (no cambia matched).
+           El control de revealed/matched lo hace el bucle principal."""
         return self.board[pos]
-
-    def apply_turn(self, pos1, pos2):
-        v1 = self.flip(pos1); v2 = self.flip(pos2)
-        matched_now = False
-        if v1==v2 and not self.matched[pos1] and not self.matched[pos2]:
-            self.matched[pos1] = self.matched[pos2] = True
-            matched_now = True
-        self.revealed[pos1]=v1; self.revealed[pos2]=v2
-        self.turns += 1
-        return v1, v2, matched_now
 
     def is_done(self):
         return all(self.matched)
@@ -173,15 +165,28 @@ def run_pygame():
     n_pairs = 18
     game = MemoryGame(n_pairs=n_pairs)
     belief = BeliefState(game.N, n_pairs)
+
+    # agentes
     agent = GreedyAgent()
     agent_type = "Greedy"
+
+    # control
     running = True
     auto = False
-    delay = 0.4
-    last_move_time = 0
+    delay_between_flips = 0.35   # tiempo entre carta1 y carta2
+    delay_after_mismatch = 0.60  # tiempo que quedan visibles si no coinciden
+    last_action_time = 0.0
+
+    # estado de turno (para mostrar/re-ocultar)
+    selected = []            # indices revelados en este turno (0,1)
+    planned_pair = None      # par planificado por el agente (a,b)
+    pending_hide = None      # (a,b) a ocultar después de verlos
+    hide_at = None           # timestamp de ocultado
 
     while running:
         clock.tick(FPS)
+        now = time.time()
+
         for ev in pygame.event.get():
             if ev.type==pygame.QUIT:
                 running=False
@@ -190,13 +195,83 @@ def run_pygame():
                     auto = not auto
                 elif ev.key==pygame.K_n:
                     game = MemoryGame(n_pairs=n_pairs); belief = BeliefState(game.N, n_pairs)
+                    selected.clear(); planned_pair=None; pending_hide=None; hide_at=None
                 elif ev.key==pygame.K_1:
                     agent = GreedyAgent(); agent_type="Greedy"
                 elif ev.key==pygame.K_2:
                     agent = SampledMCTSAgent(n_sims=20, n_rollouts=6); agent_type="MCTS"
 
+        # lógica de auto-play con revelar/ocultar
+        if auto and not game.is_done():
+            # 1) si hay un ocultado pendiente por mismatch y ya pasó el delay, ocúltalo
+            if pending_hide and hide_at and now >= hide_at:
+                a,b = pending_hide
+                # ocultar en tablero (no afectamos matched; sólo visual)
+                game.revealed[a] = None
+                game.revealed[b] = None
+                pending_hide = None
+                hide_at = None
+                selected.clear()
+                # esperamos un poco antes del siguiente primer flip
+                last_action_time = now
+
+            # 2) si no hay ocultado pendiente, hacemos la secuencia del turno
+            elif not pending_hide and (now - last_action_time >= delay_between_flips):
+                # Si no hay ninguna carta levantada en este turno → elegir par y levantar la primera
+                if len(selected) == 0:
+                    # pedir par al agente (trabaja igual que antes)
+                    planned_pair = agent.next_action(belief)
+                    a = planned_pair[0]
+                    # revelar primera
+                    va = game.flip_value(a)
+                    game.revealed[a] = va
+                    # actualizar creencias
+                    if belief.seen[a] is None:
+                        belief.seen[a] = va; belief.remaining[va] -= 1
+                    selected = [a]
+                    last_action_time = now
+
+                # Si ya hay una levantada → levantar la segunda y resolver
+                elif len(selected) == 1:
+                    a = selected[0]
+                    b = planned_pair[1]
+                    if b == a:
+                        # seguridad (no debería pasar)
+                        candidates = [i for i in range(game.N) if not game.matched[i] and i!=a and game.revealed[i] is None]
+                        b = candidates[0] if candidates else a
+
+                    vb = game.flip_value(b)
+                    game.revealed[b] = vb
+                    if belief.seen[b] is None:
+                        belief.seen[b] = vb; belief.remaining[vb] -= 1
+
+                    va = game.revealed[a]
+                    # resolvemos turno
+                    if va == vb and (not game.matched[a]) and (not game.matched[b]):
+                        # Match: quedan arriba como emparejadas
+                        game.matched[a] = True
+                        game.matched[b] = True
+                        belief.matched[a] = True
+                        belief.matched[b] = True
+                        # opcional: ya no necesitamos que sigan en revealed (el render de matched muestra el valor)
+                        game.revealed[a] = None
+                        game.revealed[b] = None
+                        selected.clear()
+                        planned_pair = None
+                        game.turns += 1
+                        last_action_time = now
+                    else:
+                        # No match: programamos ocultar ambas tras un delay
+                        pending_hide = (a, b)
+                        hide_at = now + delay_after_mismatch
+                        planned_pair = None
+                        game.turns += 1
+                        # no limpiamos selected aún; se limpia al ocultar
+                        last_action_time = now
+
+        # ---- Render ----
         screen.fill((240,240,240))
-        draw_text(screen, f"Agente: {agent_type}   (presiona 1=Greedy 2=MCTS)   SPACE ejecutar/pausar   N nuevo juego", (10,10))
+        draw_text(screen, f"Agente: {agent_type}   (1=Greedy  2=MCTS)   SPACE play/pausa   N nuevo juego", (10,10))
         draw_text(screen, f"Turnos: {game.turns}", (10,40))
 
         # draw grid
@@ -205,34 +280,26 @@ def run_pygame():
             x = margin + c*(tile_size+margin)
             y = top_offset + r*(tile_size+margin)
             rect = pygame.Rect(x,y,tile_size,tile_size)
+
             if game.matched[i]:
+                # emparejada (queda arriba siempre)
                 pygame.draw.rect(screen, (180,220,180), rect)
                 txt = bigfont.render(str(game.board[i]), True, (20,20,20))
                 screen.blit(txt, (x+tile_size//2 - txt.get_width()//2, y+tile_size//2 - txt.get_height()//2))
             else:
                 pygame.draw.rect(screen, (200,200,240), rect)
                 if game.revealed[i] is not None:
+                    # carta visible temporalmente en este turno
                     txt = bigfont.render(str(game.revealed[i]), True, (10,10,10))
-                    screen.blit(txt, (x+tile_size//2 - txt.get_width()//2, y+tile_size//2 - txt.get_height()//2))
                 else:
                     txt = bigfont.render("?", True, (10,10,10))
-                    screen.blit(txt, (x+tile_size//2 - txt.get_width()//2, y+tile_size//2 - txt.get_height()//2))
+                screen.blit(txt, (x+tile_size//2 - txt.get_width()//2, y+tile_size//2 - txt.get_height()//2))
 
-        # auto-play logic
-        if auto and not game.is_done():
-            if time.time() - last_move_time > delay:
-                a,b = agent.next_action(belief)
-                v1,v2,matched_now = game.apply_turn(a,b)
-                if belief.seen[a] is None:
-                    belief.seen[a]=v1; belief.remaining[v1]-=1
-                if belief.seen[b] is None:
-                    belief.seen[b]=v2; belief.remaining[v2]-=1
-                if v1==v2:
-                    belief.matched[a]=belief.matched[b]=True
-                last_move_time = time.time()
         if game.is_done():
-            draw_text(screen, f"¡Terminado en {game.turns} turnos! Presiona N para nuevo juego.", (10, HEIGHT-40))
+            draw_text(screen, f"¡Terminado en {game.turns} turnos!  (N = nuevo juego)", (10, HEIGHT-40))
+
         pygame.display.flip()
+
     pygame.quit()
     sys.exit()
 
