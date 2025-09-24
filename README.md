@@ -68,3 +68,6 @@ Reglas implementadas:
 - Si no coinciden: ambas se ocultan después de un pequeño delay (para que el intento sea visible).
 
 - El contador de turnos aumenta después de cada par levantado (match o no).
+
+
+Implementamos dos estrategias de búsqueda: (i) Greedy, una política informada localmente que cierra pares conocidos y, en su defecto, revela posiciones no vistas para maximizar información; y (ii) Sampled MCTS, que estima la calidad de las jugadas mediante muestreos del tablero desconocido y rollouts de finalización, eligiendo el par inicial que minimiza los turnos esperados. Probamos ambos agentes en múltiples partidas dentro del entorno Pygame, observando métricas de turnos por episodio y ajustando los parámetros de simulación para evaluar el trade-off entre rendimiento y coste computacional.
